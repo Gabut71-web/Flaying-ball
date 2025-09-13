@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Flying Ball</title>
+  <style>
+    :root{
+      --w: 360px;
+      --h: 640px;
+    }
+    html,body{
+      height:100%;
+      margin:0;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      background:linear-gradient(#87ceeb,#66b0ff 60%,#2b6fb3);
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;
+    }
+    .wrap{
+      width:min(100%, var(--w));
+      aspect-ratio: 9 / 16;
+      background: linear-gradient(#9be6ff,#7fd0ff);
+      border-radius:12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+      position:relative;
+      overflow:hidden;
+      touch-action: manipulation;
+    }
+    canvas{
+      width:100%;
+      height:100%;
+      display:block;
+      background: linear-gradient(#9be6ff,#7fd0ff);
+    }
+    .ui{
+      position:absolute;
+      left:12px;
+      top:12px;
+      color:#023047;
+      font-weight:700;
+      text-shadow:0 1px 0 rgba(255,255,255,0.6);
+      user-select:none;
+      pointer-events:none;
+    }
+    .center{
+      position:absolute;
+      width:100%;
+      text-align:center;
+      top:40%;
+      pointer-events:none;
+      color:#023047;
+      font-weight:700;
+      text-shadow:0 1px 0 rgba(255,255,255,0.6);
+    }
+    button.overlay-btn{
+      position:absolute;
+      left:50%;
+      transform:translateX(-50%);
+      bottom:24px;
+      padding:10px 18px;
+      border-radius:10px;
+      border:0;
+      background:#ffb703;
+      color:#000;
+      font-weight:800;
+      cursor:pointer;
+      box-shadow:0 6px 18px rgba(0,0,0,0.25);
+      display:none;
+    }
+    @media (max-width:420px){
+      .wrap{ border-radius:8px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="wrap">
+    <canvas id="c"></canvas>
+    <div class="ui" id="uiScore">Skor: 0</div>
+    <div class="ui" style="left:auto;right:12px" id="uiBest">Terbaik: 0</div>
+    <div class="center" id="centerText">Ketuk untuk mulai</div>
+    <button class="overlay-btn" id="restartBtn">Main Lagi</button>
+    <audio id="sFlap" preload="auto"></audio>
+    <audio id="sHit" preload="auto"></audio>
+    <audio id="sPoint" preload="auto"></audio>
+  </div>
+
+  <script>
+    // canvas setup
+    const canvas = document.getElementById('c')
+    const ctx = canvas.getContext('2d')
+    const wrap = document.getElementById('wrap')
+    const uiScore = document.getElementById('uiScore')
+    const uiBest = document.getElementById('uiBest')
+    const centerText = document.getElementById('centerText')
+    const restartBtn = document.getElementById('restartBtn')
+    const sFlap = document.getElementById('sFlap')
+    const sHit = document.getElementById('sHit')
+    const sPoint = document.getElementById('sPoint')
+
+    // small sounds as data URI (tiny placeholders)
+    sFlap.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQgAAAAA" 
+    sHit.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQgAAAAA"
+    sPoint.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQgAAAAA"
+
+    // device pixel ratio adjust
+    function resize(){
+      const rect = wrap.getBoundingClientRect()
+      canvas.width = Math.round(rect.width * devicePixelRatio)
+      canvas.height = Math.round(rect.height * devicePixelRatio)
+      ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0)
+    }
+    new ResizeObserver(resize).observe(wrap)
+    resize()
+
+    // game variables
+    const G = 900 // gravity px/s^2
+    const FLAP_V = -310 // flap velocity px/s
+    const PIPE_W = 56
+    const GAP = 150
+    const SPAWN = 1400 // ms
+    const SPEED = 140 // px/s
+    let bird, pipes, lastSpawn, lastTime, score, best, state, canvasW, canvasH
+
+    function reset(){
+      canvasW = canvas.clientWidth
+      canvasH = canvas.clientHeight
+      bird = {
+        x: Math.round(canvasW * 0.28),
+        y: Math.round(canvasH * 0.5),
+        r: Math.max(10, Math.round(canvasW * 0.045)),
+        vy: 0,
+        rot: 0
+      }
+      pipes = []
+      lastSpawn = 0
+      lastTime = performance.now()
+      score = 0
+      best = Number(localStorage.getItem('fb_best') || 0)
+      uiBest.textContent = 'Terbaik: ' + best
+      uiScore.textContent = 'Skor: 0'
+      state = 'ready' // ready, playing, over
+      centerText.style.display = 'block'
+      centerText.textContent = 'Ketuk untuk mulai'
+      restartBtn.style.display = 'none'
+      loop(performance.now())
+    }
+
+    function spawnPipe(){
+      const minTop = 40
+      const maxTop = canvasH - 40 - GAP
+      const top = Math.floor(Math.random() * (maxTop - minTop)) + minTop
+      const pipe = {
+        x: canvasW + PIPE_W,
+        top: top,
+        passed: false
+      }
+      pipes.push(pipe)
+    }
+
+    function flap(){
+      if(state === 'over') return
+      bird.vy = FLAP_V
+      bird.rot = -0.6
+      try{ sFlap.currentTime = 0; sFlap.play() }catch(e){}
+      if(state === 'ready'){
+        state = 'playing'
+        centerText.style.display = 'none'
+      }
+    }
+
+    function update(dt){
+      // dt in seconds
+      if(state === 'playing'){
+        bird.vy += G * dt
+        bird.y += bird.vy * dt
+        bird.rot += 3 * dt
+        if(bird.rot > 1.2) bird.rot = 1.2
+
+        // pipes move
+        for(let i = pipes.length -1; i >=0; i--){
+          const p = pipes[i]
+          p.x -= SPEED * dt
+          // scoring
+          if(!p.passed && p.x + PIPE_W < bird.x){
+            p.passed = true
+            score += 1
+            uiScore.textContent = 'Skor: ' + score
+            try{ sPoint.currentTime = 0; sPoint.play() }catch(e){}
+            if(score > best){
+              best = score
+              localStorage.setItem('fb_best', best)
+              uiBest.textContent = 'Terbaik: ' + best
+            }
+          }
+          // remove offscreen
+          if(p.x + PIPE_W < -20) pipes.splice(i,1)
+        }
+
+        // spawn pipes
+        if(performance.now() - lastSpawn > SPAWN){
+          spawnPipe()
+          lastSpawn = performance.now()
+        }
+
+        // collision with ground or ceiling
+        if(bird.y + bird.r >= canvasH - 4){
+          bird.y = canvasH - 4 - bird.r
+          die()
+        }
+        if(bird.y - bird.r <= 4){
+          bird.y = 4 + bird.r
+          bird.vy = 0
+        }
+
+        // collision with pipes
+        for(const p of pipes){
+          // top pipe rect: x -> x+PIPE_W, y 0 -> p.top
+          // bottom pipe rect: x -> x+PIPE_W, y p.top+GAP -> canvasH
+          if(circleRectCollision(bird.x, bird.y, bird.r, p.x, 0, PIPE_W, p.top)) die()
+          if(circleRectCollision(bird.x, bird.y, bird.r, p.x, p.top + GAP, PIPE_W, canvasH - (p.top + GAP))) die()
+        }
+      } else if(state === 'ready'){
+        // small idle bob
+        bird.y += Math.sin(performance.now() / 300) * 0.6 * dt * 60
+      }
+    }
+
+    function die(){
+      if(state === 'over') return
+      state = 'over'
+      try{ sHit.currentTime = 0; sHit.play() }catch(e){}
+      centerText.style.display = 'block'
+      centerText.textContent = 'Game Over'
+      restartBtn.style.display = 'block'
+    }
+
+    function circleRectCollision(cx, cy, r, rx, ry, rw, rh){
+      const nearestX = Math.max(rx, Math.min(cx, rx + rw))
+      const nearestY = Math.max(ry, Math.min(cy, ry + rh))
+      const dx = cx - nearestX
+      const dy = cy - nearestY
+      return (dx * dx + dy * dy) <= (r * r)
+    }
+
+    function draw(){
+      // clear
+      ctx.clearRect(0,0,canvasW,canvasH)
+
+      // background sky gradient already via CSS; draw ground and clouds simple
+      // draw pipes
+      for(const p of pipes){
+        const x = p.x
+        const topH = p.top
+        const bottomY = p.top + GAP
+        // pipe color
+        ctx.fillStyle = '#2e8b57'
+        // top pipe
+        roundRect(ctx, x, 0, PIPE_W, topH, 8, true)
+        // bottom pipe
+        roundRect(ctx, x, bottomY, PIPE_W, canvasH - bottomY - 4, 8, true)
+        // pipe rim
+        ctx.fillStyle = '#1f5f3a'
+        ctx.fillRect(x, topH - 8, PIPE_W, 8)
+        ctx.fillRect(x, bottomY, PIPE_W, 8)
+      }
+
+      // draw ground
+      ctx.fillStyle = '#a46a2f'
+      ctx.fillRect(0, canvasH - 4, canvasW, 4)
+
+      // draw bird (circle with eye)
+      ctx.save()
+      ctx.translate(bird.x, bird.y)
+      ctx.rotate(bird.rot)
+      // body
+      ctx.fillStyle = '#ffdd57'
+      ctx.beginPath()
+      ctx.ellipse(0,0,bird.r * 1.1, bird.r, 0, 0, Math.PI * 2)
+      ctx.fill()
+      // wing
+      ctx.fillStyle = '#f4c542'
+      ctx.beginPath()
+      ctx.ellipse(-bird.r * 0.1, bird.r * 0.1, bird.r * 0.5, bird.r * 0.25, 0, 0, Math.PI * 2)
+      ctx.fill()
+      // eye
+      ctx.fillStyle = '#000'
+      ctx.beginPath()
+      ctx.arc(bird.r * 0.28 * -1, -bird.r * 0.22, Math.max(1, bird.r * 0.16), 0, Math.PI * 2)
+      ctx.fill()
+      ctx.restore()
+    }
+
+    function roundRect(ctx, x, y, w, h, r, fill){
+      ctx.beginPath()
+      ctx.moveTo(x + r, y)
+      ctx.arcTo(x + w, y, x + w, y + h, r)
+      ctx.arcTo(x + w, y + h, x, y + h, r)
+      ctx.arcTo(x, y + h, x, y, r)
+      ctx.arcTo(x, y, x + w, y, r)
+      ctx.closePath()
+      if(fill) ctx.fill()
+      else ctx.stroke()
+    }
+
+    function loop(t){
+      resize()
+      canvasW = canvas.clientWidth
+      canvasH = canvas.clientHeight
+      const now = t
+      const dt = Math.min(0.05, (now - lastTime) / 1000)
+      lastTime = now
+      update(dt)
+      draw()
+      requestAnimationFrame(loop)
+    }
+
+    // input
+    function tap(){
+      if(state === 'over') return
+      flap()
+    }
+
+    // support click, touch, spacebar
+    wrap.addEventListener('pointerdown', (e)=>{
+      e.preventDefault()
+      tap()
+    }, {passive:false})
+
+    window.addEventListener('keydown', (e)=>{
+      if(e.code === 'Space') {
+        if(state === 'over'){
+          startAgain()
+        } else {
+          flap()
+        }
+      }
+    })
+
+    restartBtn.addEventListener('click', startAgain)
+
+    function startAgain(){
+      reset()
+    }
+
+    // init
+    lastTime = performance.now()
+    reset()
+
+    // small touch to unlock audio on mobile
+    document.addEventListener('pointerdown', function unlock(){
+      try{
+        sFlap.play().catch(()=>{})
+        sFlap.pause()
+        sPoint.play().catch(()=>{})
+        sPoint.pause()
+        sHit.play().catch(()=>{})
+        sHit.pause()
+      }catch(e){}
+      document.removeEventListener('pointerdown', unlock)
+    }, {passive:true})
+
+    // expose for debugging (optional)
+    window._fb = {reset, flap, pipes}
+  </script>
+</body>
+</html>
